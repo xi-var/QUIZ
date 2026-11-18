@@ -1,0 +1,363 @@
+(function (root) {
+  'use strict';
+
+  var PARTICLES = ['에서는','에서도','으로는','으로도','에게는','으로써','으로서','까지는','부터는','이라는','이라고','라는','에서','으로','에게','까지','부터','라고','처럼','보다','마다','에는','에도','이나','이며','이고','이란','와는','과는','은','는','이','가','을','를','의','에','로','와','과','도','만','란']
+    .sort(function (a, b) { return b.length - a.length; });
+  var STOP_KO = new Set(['그','이','저','것','수','등','및','또는','그리고','하지만','그러나','따라서','때문','경우','이후','이전','대한','통해','위해','매우','가장','주로','더','또','다른','같은','모든','각','여러','어떤','이런','그런','우리','때','중','안','위','아래','다음','먼저','이상','이하','정도','하나','가지','사이','결과','내용','부분','방법','문제','시간','일정','영향','다시','이미','아직','바로','함께','모두','어떻게','무엇','만드','이루','일으','나타','늘어','줄어','높아','낮아','커지','작아','강해','약해','이용','사용','필요']);
+  var STOP_EN = new Set(['the','and','for','are','but','not','you','all','any','can','had','her','was','one','our','out','has','have','this','that','with','from','they','will','would','there','their','what','which','when','who','how','been','were','also','into','than','then','them','these','those','its','his','she','him','may','such','more','most','other','some','only','over','very']);
+  var NONE = '정답 없음';
+
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      var t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function shuffle(arr, rnd) {
+    var a = arr.slice();
+    for (var i = a.length - 1; i > 0; i--) { var j = Math.floor(rnd() * (i + 1)); var t = a[i]; a[i] = a[j]; a[j] = t; }
+    return a;
+  }
+  function hash(str) {
+    var h = 0x811c9dc5;
+    for (var i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); }
+    return (h >>> 0).toString(36);
+  }
+  function batchimOf(word) {
+    var c = word.charCodeAt(word.length - 1);
+    if (c >= 0xAC00 && c <= 0xD7A3) return (c - 0xAC00) % 28;
+    var ch = word.charAt(word.length - 1);
+    return /[0-9]/.test(ch) && '013678'.indexOf(ch) >= 0 ? 1 : 0;
+  }
+  function josa(word, pair) { return batchimOf(word) ? pair.charAt(0) : pair.charAt(1); }
+
+  /* ---------- 글 정리: 줄바꿈으로 잘린 문장을 이어 붙이고 쪽 번호, 머리말을 지워요 ---------- */
+  function endsSentence(l) {
+    return /[.!?。？！…]["'”’)\]」』]*$/.test(l) || /(다|요|함|음|임|됨)$/.test(l);
+  }
+  function cleanText(text) {
+    var t = String(text || '').replace(/\r/g, '').replace(/[ \t]/g, ' ').replace(/ {2,}/g, ' ');
+    var lines = t.split('\n').map(function (l) { return l.trim(); });
+    lines = lines.filter(function (l) {
+      return !(/^[-–—\s]*\d{1,4}[-–—\s]*$/.test(l) || /^\d{1,4}\s*\/\s*\d{1,4}$/.test(l) || /^(page|p\.)\s*\d+$/i.test(l));
+    });
+    var freq = {};
+    lines.forEach(function (l) { if (l.length >= 4 && l.length <= 40) freq[l] = (freq[l] || 0) + 1; });
+    lines = lines.filter(function (l) { return !(freq[l] >= 3 && !endsSentence(l)); });
+    var out = [], cur = '', last = '';
+    function flush() { if (cur) { out.push(cur); cur = ''; } }
+    var listRe = /^([-•·*▪■□◆◇○●]|\d{1,2}[.)]|[①-⑳]|[가-하][.)])\s*/;
+    lines.forEach(function (l) {
+      if (!l) { flush(); last = ''; return; }
+      if (!cur) { cur = l; last = l; return; }
+      var heading = cur === last && last.length <= 14 && last.split(' ').length <= 2 && !endsSentence(last) && !/(은|는|이|가|을|를|의|에|로|와|과|도|서|며|고|인|한|는데|라는|하는|에서|으로|에게)$/.test(last);
+      if (endsSentence(cur) || listRe.test(l) || heading) { flush(); cur = l; }
+      else cur += ' ' + l;
+      last = l;
+    });
+    flush();
+    return out.join('\n');
+  }
+  function splitSentences(text) {
+    return cleanText(text)
+      .replace(/([.!?。？！])\s+/g, '$1\n')
+      .split(/\n+/)
+      .map(function (s) { return s.replace(/\s+/g, ' ').trim(); })
+      .filter(function (s) { return s.length >= 10; });
+  }
+
+  function stemOf(tok) {
+    var t = String(tok).replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, '');
+    if (!t) return null;
+    if (/^[A-Za-z][A-Za-z\-']*$/.test(t)) return t;
+    for (var i = 0; i < PARTICLES.length; i++) {
+      var p = PARTICLES[i];
+      var minLeft = 1;
+      if (t.length - p.length >= minLeft && t.slice(-p.length) === p) return t.slice(0, -p.length);
+    }
+    return t;
+  }
+  function kindOf(s) {
+    if (/^[A-Za-z]/.test(s)) return 'en';
+    if (/^\d/.test(s)) return 'num';
+    return 'ko';
+  }
+  function isCandidate(s) {
+    if (!s) return false;
+    if (/^[A-Za-z][A-Za-z\-']*$/.test(s)) return s.length >= 3 && !STOP_EN.has(s.toLowerCase());
+    if (/^\d[\d,.]*(%|퍼센트|년|월|일|개|명|원|배|도|℃|km|kg|cm|mm|ml|m|g|L)?$/i.test(s)) return s.length >= 2;
+    if (!/^[\p{Script=Hangul}\p{N}A-Za-z]+$/u.test(s)) return false;
+    if (s.length < 2 || s.length > 10) return false;
+    if (STOP_KO.has(s)) return false;
+    if (/(다|요|니다|하고|하며|하여|해서|하는|되는|있는|없는|같은|위한|통해|대해|때문|그리고|하지만|그러나|으로|에서|으면|려면|하면|되면|나지|하지|되지|않는|지만|는데)$/.test(s)) return false;
+    if (s.length >= 3 && /(한|된|할|될|적|게|면)$/.test(s)) return false;
+    if (/(어|아|여|며|에|드|나드)$/.test(s) && !/^(언어|영어|단어|국어|외국어|한국어|모국어|소수|분자|원자)$/.test(s)) return false;
+    return true;
+  }
+  function tokensOf(sentence) {
+    var out = [], re = /[^\s,;:()\[\]{}"'“”‘’·…\/]+/g, m;
+    while ((m = re.exec(sentence))) out.push({ raw: m[0], stem: stemOf(m[0]), index: m.index });
+    return out;
+  }
+  function fixParticle(rest, repl) {
+    var m = /^(.*?)([.!?。,]*)$/.exec(rest), core = m[1], tail = m[2], b = batchimOf(repl);
+    var pairs = [['은', '는'], ['이', '가'], ['을', '를'], ['과', '와']];
+    for (var i = 0; i < pairs.length; i++) {
+      if (core === pairs[i][0] || core === pairs[i][1]) return (b ? pairs[i][0] : pairs[i][1]) + tail;
+    }
+    if (core === '이란' || core === '란') return (b ? '이란' : '란') + tail;
+    if (core === '으로' || core === '로') return (b && b !== 8 ? '으로' : '로') + tail;
+    return rest;
+  }
+  function replaceTerm(sentence, target, repl) {
+    var toks = tokensOf(sentence), out = '', last = 0, blank = repl === '____';
+    toks.forEach(function (t) {
+      if (t.stem === target) {
+        var p = t.raw.indexOf(target);
+        if (p < 0) return;
+        out += sentence.slice(last, t.index + p) + repl;
+        if (blank) { last = t.index + p + target.length; }
+        else { out += fixParticle(t.raw.slice(p + target.length), repl); last = t.index + t.raw.length; }
+      }
+    });
+    return out + sentence.slice(last);
+  }
+  function trunc(s, n) { s = String(s); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+  function normForMatch(s) { return String(s || '').toLowerCase().replace(/[\s\p{P}\p{S}]/gu, ''); }
+  function checkShort(given, q) {
+    var raw = String(given || '').trim();
+    if (!raw) return false;
+    var forms = [normForMatch(raw)], st = stemOf(raw);
+    if (st) forms.push(normForMatch(st));
+    var list = [q.answer].concat(q.accept || []).map(normForMatch);
+    return forms.some(function (f) { return f && list.indexOf(f) >= 0; });
+  }
+
+  function analyze(text) {
+    var sentences = splitSentences(text);
+    var toks = sentences.map(tokensOf);
+    var counts = new Map();
+    toks.forEach(function (ts) {
+      ts.forEach(function (t) {
+        if (t.stem && isCandidate(t.stem)) counts.set(t.stem, (counts.get(t.stem) || 0) + 1);
+      });
+    });
+    var defRe = /^(.{2,30}?)(이란|란|은|는)\s(.{6,}?)(이다|말한다|뜻한다|의미한다|부른다|한다)\.?$/;
+    var defs = [], defTerms = new Set();
+    sentences.forEach(function (s, i) {
+      var m = defRe.exec(s);
+      if (!m) return;
+      var parts = m[1].trim().split(' ');
+      if (parts.length > 2) return;
+      var term = stemOf(parts[parts.length - 1]);
+      if (term && isCandidate(term)) { defTerms.add(term); defs.push({ term: term, sentence: s, index: i }); }
+    });
+    var terms = [], termMap = new Map();
+    counts.forEach(function (count, term) {
+      var kind = kindOf(term);
+      var score = count * 2 + (kind === 'ko' && term.length >= 3 && term.length <= 6 ? 1 : 0) + (kind === 'num' ? 1 : 0) + (defTerms.has(term) ? 3 : 0);
+      var info = { term: term, count: count, score: score, kind: kind };
+      terms.push(info); termMap.set(term, info);
+    });
+    terms.sort(function (a, b) { return b.score - a.score || b.count - a.count; });
+    var sentTerms = toks.map(function (ts) {
+      var set = new Set();
+      ts.forEach(function (t) { if (t.stem && termMap.has(t.stem)) set.add(t.stem); });
+      return set;
+    });
+    return { sentences: sentences, toks: toks, terms: terms, termMap: termMap, sentTerms: sentTerms, defs: defs };
+  }
+
+  var KIND_NAME = { mc: '빈칸 객관식', ox: 'OX', short: '단답' };
+
+  function candidateItems(A, boost) {
+    var items = [];
+    A.sentences.forEach(function (s, i) {
+      if (s.length < 14 || s.length > 150) return;
+      var ts = A.toks[i];
+      if (ts.length < 4) return;
+      var seen = {}, cands = [];
+      ts.forEach(function (t) {
+        var info = t.stem && A.termMap.get(t.stem);
+        if (info && !seen[t.stem]) { seen[t.stem] = 1; cands.push(info); }
+      });
+      cands.sort(function (a, b) { return b.score - a.score; });
+      cands.slice(0, 4).forEach(function (info, rank) {
+        items.push({ i: i, s: s, target: info.term, score: info.score + (boost[info.term] || 0) * 2 - rank * 3, kind: info.kind });
+      });
+    });
+    return items;
+  }
+
+  /* 이 글로 만들 수 있는 문제 수(대략). 같은 문장·핵심어도 유형을 바꾸면 다시 쓸 수 있어요. */
+  function capacity(text, typeCount) {
+    var items = candidateItems(analyze(text), {});
+    return Math.min(1000, items.length * Math.max(1, typeCount || 3));
+  }
+
+  function generate(text, opts) {
+    opts = opts || {};
+    var count = Math.max(1, Math.min(opts.count || 10, 1000));
+    var types = (opts.types && opts.types.length ? opts.types : ['mc', 'ox', 'short']).slice();
+    var rnd = mulberry32(opts.seed == null ? 1 : opts.seed);
+    var A = analyze(text);
+    var items = candidateItems(A, opts.boost || {});
+
+    var ranked = items.map(function (it) { return { it: it, k: it.score + rnd() * 2 }; })
+      .sort(function (a, b) { return b.k - a.k; }).map(function (x) { return x.it; });
+    var cap = ranked.length;
+
+    function distractors(item, n, exclude) {
+      var pool = A.terms.filter(function (t) {
+        return t.kind === item.kind && t.term !== item.target && !A.sentTerms[item.i].has(t.term) &&
+          t.term.indexOf(item.target) < 0 && item.target.indexOf(t.term) < 0 && (!exclude || exclude.indexOf(t.term) < 0);
+      });
+      if (pool.length < n) return null;
+      pool.sort(function (a, b) {
+        return Math.abs(a.term.length - item.target.length) - Math.abs(b.term.length - item.target.length) || b.score - a.score;
+      });
+      return shuffle(pool.slice(0, 8), rnd).slice(0, n).map(function (t) { return t.term; });
+    }
+    function nearMiss(item) {
+      var pool = A.terms.filter(function (t) {
+        return t.kind === item.kind && t.term !== item.target && !A.sentTerms[item.i].has(t.term) &&
+          t.term.indexOf(item.target) < 0 && item.target.indexOf(t.term) < 0;
+      });
+      if (!pool.length) return null;
+      var tc = item.target.split('');
+      var best = null, bs = -1e9;
+      pool.slice(0, 40).forEach(function (t) {
+        var shared = 0; t.term.split('').forEach(function (c) { if (tc.indexOf(c) >= 0) shared++; });
+        var s = shared * 2 + (t.term.charAt(0) === item.target.charAt(0) ? 3 : 0) - Math.abs(t.term.length - item.target.length) + t.score * 0.1;
+        if (s > bs) { bs = s; best = t.term; }
+      });
+      return best;
+    }
+    function whereUsed(term, exceptIdx) {
+      for (var i = 0; i < A.sentences.length; i++) if (i !== exceptIdx && A.sentTerms[i].has(term)) return A.sentences[i];
+      return null;
+    }
+    function wrongNote(c, item) {
+      var u = whereUsed(c, item.i);
+      return '‘' + c + '’' + josa(c, '은는') + ' ' + (u ? '본문의 “' + trunc(u, 60) + '” 같은 다른 문장에 나오는 말이라 이 빈칸에는 맞지 않아요.' : '이 문장의 내용과 맞지 않아요.');
+    }
+    function base(item, type) {
+      return { type: type, target: item.target, evidence: item.s, source: 'rule', k: hash(type + '|' + item.s + '|' + item.target) };
+    }
+
+    function buildMC(item, withNone) {
+      var d = distractors(item, withNone ? 2 : 3);
+      if (!d) return null;
+      var choices = shuffle([item.target].concat(d), rnd);
+      var answer = choices.indexOf(item.target);
+      if (withNone) choices.push(NONE);
+      var feedback = choices.map(function (c, k) {
+        if (k === answer) return '정답이에요.';
+        if (c === NONE) return '본문에 맞는 말이 있어서 ‘정답 없음’은 아니에요. 정답은 ‘' + item.target + '’이에요.';
+        return wrongNote(c, item);
+      });
+      var q = base(item, 'mc');
+      q.q = '빈칸에 들어갈 알맞은 말은?'; q.passage = replaceTerm(item.s, item.target, '____');
+      q.choices = choices; q.answer = answer; q.feedback = feedback;
+      q.explain = '정답은 ‘' + item.target + '’이에요.';
+      return q;
+    }
+    /* 함정 문제: 문제는 그대로 두고, 진짜 답 대신 비슷해 보이는 말만 보기에 넣어요. 정답은 '정답 없음'이에요. */
+    function buildTrick(item) {
+      var near = nearMiss(item);
+      if (!near) return null;
+      var others = distractors(item, 2, [near]);
+      if (!others) return null;
+      var firstThree = shuffle([near].concat(others), rnd);
+      var choices = firstThree.concat([NONE]);
+      var feedback = choices.map(function (c) {
+        if (c === NONE) return '맞아요. 본문의 정답은 ‘' + item.target + '’인데 보기에 없어서 ‘정답 없음’이 정답이에요.';
+        if (c === near) return '‘' + c + '’' + josa(c, '은는') + ' 본문의 ‘' + item.target + '’과(와) 비슷해 보이지만 다른 말이에요.';
+        return wrongNote(c, item);
+      });
+      var q = base(item, 'mc');
+      q.k = hash('trick|' + item.s + '|' + item.target);
+      q.trick = true;
+      q.q = '빈칸에 들어갈 알맞은 말은?'; q.passage = replaceTerm(item.s, item.target, '____');
+      q.choices = choices; q.answer = 3; q.feedback = feedback;
+      q.explain = '본문의 진짜 답은 ‘' + item.target + '’이에요. 보기에는 비슷한 말만 있어서 ‘정답 없음’이 정답이에요.';
+      return q;
+    }
+    function buildShort(item) {
+      var q = base(item, 'short');
+      q.q = '빈칸에 알맞은 말을 쓰세요.'; q.passage = replaceTerm(item.s, item.target, '____');
+      q.answer = item.target; q.hint = item.target.length + '글자';
+      q.explain = '정답은 ‘' + item.target + '’이에요.';
+      return q;
+    }
+    function buildOX(item) {
+      var d = distractors(item, 1);
+      var makeFalse = d && rnd() < 0.5;
+      var q = base(item, 'ox');
+      q.q = '다음 설명이 본문 내용과 맞으면 O, 틀리면 X를 고르세요.';
+      if (makeFalse) {
+        var stmt = replaceTerm(item.s, item.target, d[0]);
+        if (stmt !== item.s) {
+          q.passage = stmt; q.answer = false;
+          q.explain = '본문에는 “' + item.s + '”라고 나와 있어요. ‘' + d[0] + '’이(가) 아니라 ‘' + item.target + '’이(가) 맞아요.';
+          q.k = hash('ox-false|' + item.s + '|' + item.target);
+          return q;
+        }
+      }
+      q.passage = item.s; q.answer = true; q.explain = '본문에 같은 내용이 나와 있어요.';
+      return q;
+    }
+
+    var slots = [];
+    for (var r = 0; r < types.length && slots.length < count; r++) {
+      for (var idx = 0; idx < cap && slots.length < count; idx++) slots.push({ item: ranked[idx], type: types[(idx + r) % types.length], r: r });
+    }
+    slots.sort(function (a, b) { return a.item.i - b.item.i || a.r - b.r; });
+
+    var trickOn = types.indexOf('mc') >= 0;
+    var questions = [], n = 0, seen = {};
+    slots.forEach(function (sl) {
+      n++;
+      var q = null;
+      if (trickOn && n % 10 === 0) q = buildTrick(sl.item);
+      if (!q) {
+        if (sl.type === 'mc') q = buildMC(sl.item, rnd() < 0.25) || buildShort(sl.item);
+        else if (sl.type === 'ox') q = buildOX(sl.item);
+        else q = buildShort(sl.item);
+      }
+      if (q && q.type === 'ox' && seen['ox|' + q.passage]) q = buildShort(sl.item);
+      if (q && q.type === 'ox') seen['ox|' + q.passage] = 1;
+      if (q) questions.push(q);
+    });
+
+    var keySentences = items.slice().sort(function (a, b) { return b.score - a.score; }).slice(0, 3)
+      .sort(function (a, b) { return a.i - b.i; }).map(function (x) { return x.s; });
+    var cards = A.defs.map(function (d) {
+      return { front: '‘' + d.term + '’' + josa(d.term, '은는') + ' 무엇일까요?', back: d.sentence, target: d.term, k: hash('card|def|' + d.term) };
+    });
+    var usedS = {};
+    A.defs.forEach(function (d) { usedS[d.index] = 1; });
+    items.slice().sort(function (a, b) { return b.score - a.score; }).forEach(function (it) {
+      if (cards.length >= 40 || usedS[it.i]) return;
+      usedS[it.i] = 1;
+      cards.push({ front: replaceTerm(it.s, it.target, '____'), back: it.target + ' — ' + it.s, target: it.target, k: hash('card|' + it.s + '|' + it.target) });
+    });
+    return {
+      cards: cards,
+      questions: questions,
+      concepts: A.terms.slice(0, 10).map(function (t) { return { term: t.term, count: t.count }; }),
+      definitions: A.defs.map(function (d) { return { term: d.term, sentence: d.sentence }; }),
+      keySentences: keySentences,
+      stats: { sentences: A.sentences.length, usable: items.length, capacity: items.length * types.length }
+    };
+  }
+
+  var api = {
+    generate: generate, capacity: capacity, cleanText: cleanText, splitSentences: splitSentences, josa: josa, stemOf: stemOf,
+    checkShort: checkShort, normForMatch: normForMatch, analyze: analyze, hash: hash, KIND_NAME: KIND_NAME, NONE: NONE
+  };
+  root.QuizEngine = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
+if (typeof module !== 'undefined' && module.exports) module.exports = globalThis.QuizEngine;
